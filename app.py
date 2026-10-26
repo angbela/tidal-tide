@@ -309,6 +309,11 @@ if st.session_state.results is not None:
     else: # RTide
         st.subheader("RTide Model Summary")
         st.info("RTide uses an automated response method (ML-based) instead of fixed harmonic constituents.")
+        coef_df = pd.DataFrame({
+            "Constituent": ["Not applicable for RTide"],
+            "Amplitude (cm)": [np.nan],
+            "Phase (deg)": [np.nan]
+        })
         
         # Datums for RTide (Statistical approximations)
         MSL = np.mean(elev)
@@ -353,21 +358,26 @@ if st.session_state.results is not None:
     st.metric("Tidal Range", f"{tidal_range:.2f} cm")
 
     # -----------------------------
-    # CSV download
+    # Excel download
     # -----------------------------
     output_df = pd.DataFrame({
-        "datetime": pd.to_datetime(time_val),
+        "datetime": pd.to_datetime(time_val).tz_localize(None),
         "observed_cm": elev,
         "fit_cm": fit,
         "residual_cm": residual
     })
-    csv_data = output_df.to_csv(index=False)
-    st.subheader("Download Time Series Data")
+    excel_data = io.BytesIO()
+    with pd.ExcelWriter(excel_data, engine="openpyxl") as writer:
+        output_df.to_excel(writer, sheet_name="utide_tidal_timeseries", index=False)
+        coef_df.to_excel(writer, sheet_name="harmonic_constituents", index=False)
+        datum_df.to_excel(writer, sheet_name="tidal_elevations", index=False)
+
+    st.subheader("Download Analysis Results")
     st.download_button(
-        label="📥 Download CSV (Observed, Fit, Residual)",
-        data=csv_data,
-        file_name=f"{method_used.lower()}_tidal_timeseries.csv",
-        mime="text/csv"
+        label="📥 Download Excel Workbook (3 sheets)",
+        data=excel_data.getvalue(),
+        file_name=f"{method_used.lower()}_tidal_timeseries.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
 else:

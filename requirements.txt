@@ -6,3 +6,4 @@ utide
 rtide
 tensorflow
 scikit-learn
+openpyxl
