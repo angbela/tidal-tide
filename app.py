@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
+import streamlit.components.v1 as components
+import base64
 import io
 import re
 import contextlib
@@ -31,6 +33,52 @@ def set_seed(seed=0):
         # (though it might slow down training)
         # os.environ['TF_DETERMINISTIC_OPS'] = '1'
 
+def display_copyable_table(title, dataframe):
+    title_column, copy_column = st.columns([8, 1])
+    title_column.subheader(title)
+    table_text = dataframe.to_csv(sep="\t", index=False, lineterminator="\n")
+    encoded_table = base64.b64encode(table_text.encode("utf-8")).decode("ascii")
+    copy_component = f"""
+        <button id="copy-table" title="Copy" aria-label="Copy"
+            style="height: 20px; padding: 0 12px; border: 1px;
+            border-radius: 8px; cursor: pointer; font-size: 12px;">
+            Copy table
+        </button>
+        <script>
+            const tableBytes = Uint8Array.from(atob("{encoded_table}"), c => c.charCodeAt(0));
+            const tableText = new TextDecoder().decode(tableBytes);
+            const copyButton = document.getElementById("copy-table");
+            let resetLabelTimeout;
+
+            copyButton.addEventListener("click", async () => {{
+                try {{
+                    await navigator.clipboard.writeText(tableText);
+                }} catch (error) {{
+                    const textarea = document.createElement("textarea");
+                    textarea.value = tableText;
+                    textarea.style.position = "fixed";
+                    textarea.style.left = "-9999px";
+                    document.body.appendChild(textarea);
+                    textarea.select();
+                    const copied = document.execCommand("copy");
+                    textarea.remove();
+                    if (!copied) {{
+                        copyButton.textContent = "Copy failed";
+                        return;
+                    }}
+                }}
+                copyButton.textContent = "Copied";
+                clearTimeout(resetLabelTimeout);
+                resetLabelTimeout = setTimeout(() => {{
+                    copyButton.textContent = "Copy table";
+                }}, 2000);
+            }});
+        </script>
+    """
+    with copy_column:
+        components.html(copy_component, height=48)
+    st.dataframe(dataframe, use_container_width=True)
+
 # -----------------------------
 # Streamlit config
 # -----------------------------
@@ -44,11 +92,13 @@ st.markdown("Perform tidal analysis using either **Harmonic (UTide)** or **Autom
 # -----------------------------
 if "results" not in st.session_state:
     st.session_state.results = None
+if "location_name_error_visible" not in st.session_state:
+    st.session_state.location_name_error_visible = False
 
 # -----------------------------
 # Sidebar inputs
 # -----------------------------
-st.sidebar.header("Analysis Settings")
+st.sidebar.header("1. Analysis Setting")
 
 method = st.sidebar.radio(
     "Select Method",
@@ -56,7 +106,12 @@ method = st.sidebar.radio(
     index=0
 )
 
-st.sidebar.header("Input Parameters")
+st.sidebar.header("2. Input Parameters")
+
+elevation_unit = st.sidebar.radio(
+    "Water Elevation Unit",
+    options=["m", "cm"]
+)
 
 latitude = st.sidebar.number_input(
     "Latitude (deg)",
@@ -90,17 +145,37 @@ if "UTide" in method:
         default=[c for c in default_constituents if c in all_constituents]
     )
 
-run_button = st.sidebar.button("Run Analysis")
-
 # -----------------------------
 # Main input area
 # -----------------------------
-st.subheader("Paste Hourly Elevation Data (cm)")
+location_name = st.text_input("Location Name")
+if location_name.strip():
+    st.session_state.location_name_error_visible = False
+
+location_name_error = st.empty()
+if st.session_state.location_name_error_visible:
+    location_name_error.error("Please enter a location name.")
+
+st.subheader(f"Paste Hourly Elevation Data ({elevation_unit})")
 
 data_text = st.text_area(
     "One value per line, hourly interval",
-    height=250,
-    placeholder="123.4\n125.1\n128.0\n130.2"
+    height=200,
+    placeholder=(
+        "123.4\n125.1\n128.0\n130.2"
+        if elevation_unit == "cm"
+        else "1.23\n1.25\n1.28\n1.30"
+    )
+)
+
+if st.session_state.results is None:
+    st.info("Paste elevation data, set parameters, then click **Run Analysis**.")
+
+_, run_button_column = st.columns([8, 1.5])
+run_button = run_button_column.button(
+    "Run Analysis",
+    type="primary",
+    use_container_width=True
 )
 
 # -----------------------------
@@ -126,6 +201,11 @@ class RTideProgress(io.StringIO):
 # -----------------------------
 if run_button:
 
+    if not location_name.strip():
+        st.session_state.location_name_error_visible = True
+        location_name_error.error("Please enter a location name.")
+        st.stop()
+
     if not data_text.strip():
         st.error("Please paste elevation data.")
         st.stop()
@@ -134,8 +214,8 @@ if run_button:
         elev = pd.read_csv(
             io.StringIO(data_text),
             header=None,
-            names=["elevation_cm"]
-        )["elevation_cm"].astype(float).values
+            names=["elevation"]
+        )["elevation"].astype(float).values
     except Exception as e:
         st.error(f"Error reading pasted data: {e}")
         st.stop()
@@ -167,7 +247,9 @@ if run_button:
                 "fit": fit,
                 "residual": residual,
                 "coef": coef,
-                "constituents": selected_constituents
+                "constituents": selected_constituents,
+                "unit": elevation_unit,
+                "location": location_name.strip()
             }
 
     elif "RTide" in method:
@@ -206,7 +288,9 @@ if run_button:
                     "observed": elev,
                     "fit": fit,
                     "residual": residual,
-                    "model": model
+                    "model": model,
+                    "unit": elevation_unit,
+                    "location": location_name.strip()
                 }
         except Exception as e:
             st.error(f"Error during RTide analysis: {e}")
@@ -222,6 +306,10 @@ if st.session_state.results is not None:
     fit = res["fit"]
     residual = res["residual"]
     method_used = res["method"]
+    result_unit = res.get("unit", elevation_unit)
+    result_location = res.get("location", location_name.strip()) or "location"
+
+    st.title(f"{method_used} Tidal Analysis Result")
 
     # -----------------------------
     # Plot with residual
@@ -248,14 +336,14 @@ if st.session_state.results is not None:
         label=f"{method_used} Fit"
     )
 
-    ax1.set_ylabel("Water Level (cm)")
+    ax1.set_ylabel(f"Water Level ({result_unit})")
     ax1.set_title(f"Observed and {method_used}-Fitted Tide")
     ax1.legend(frameon=False, handlelength=3)
     ax1.grid(False)
 
     ax2.plot(time_val, residual, color="black", linestyle=":", linewidth=1.2)
     ax2.axhline(0, color="black", linestyle="--", linewidth=1.0)
-    ax2.set_ylabel("Residual (cm)")
+    ax2.set_ylabel(f"Residual ({result_unit})")
     ax2.set_xlabel("Time")
     ax2.grid(False)
 
@@ -266,7 +354,6 @@ if st.session_state.results is not None:
     # Method-specific results
     # -----------------------------
     if method_used == "UTide":
-        st.subheader("Harmonic Constituents")
         coef = res["coef"]
         names = [n.upper() for n in coef.name]
         amplitudes = coef.A
@@ -281,8 +368,10 @@ if st.session_state.results is not None:
                 rows.append([c, np.nan, np.nan])
         rows.append(["S0", coef.mean, 0.0])
 
-        coef_df = pd.DataFrame(rows, columns=["Constituent", "Amplitude (cm)", "Phase (deg)"])
-        st.dataframe(coef_df, use_container_width=True)
+        coef_df = pd.DataFrame(
+            rows,
+            columns=["Constituent", f"Amplitude ({result_unit})", "Phase (deg)"]
+        )
 
         # Datums for UTide
         MSL = coef.mean if hasattr(coef, 'mean') else np.mean(elev)
@@ -311,7 +400,7 @@ if st.session_state.results is not None:
         st.info("RTide uses an automated response method (ML-based) instead of fixed harmonic constituents.")
         coef_df = pd.DataFrame({
             "Constituent": ["Not applicable for RTide"],
-            "Amplitude (cm)": [np.nan],
+            f"Amplitude ({result_unit})": [np.nan],
             "Phase (deg)": [np.nan]
         })
         
@@ -338,33 +427,36 @@ if st.session_state.results is not None:
     # -----------------------------
     # Tidal Datums table
     # -----------------------------
-    st.subheader("Tidal Elevations")
+    if method_used == "UTide":
+        display_copyable_table("Harmonic Constituents", coef_df)
+
     datum_df = pd.DataFrame({
         "Datum": list(datums.keys()),
-        "Elevation (cm)": list(datums.values()),
+        f"Elevation MSL datum ({result_unit})": list(datums.values()),
+        f"Elevation LWS datum ({result_unit})": [elevation - datums["LWS"] for elevation in datums.values()],
         "Description": datum_desc
     })
-    st.dataframe(datum_df, use_container_width=True)
+    display_copyable_table("Tidal Elevations", datum_df)
 
     # -----------------------------
     # Model Accuracy
     # -----------------------------
     st.subheader("Model Accuracy")
     rmse = np.sqrt(mean_squared_error(elev, fit))
-    tidal_range = np.nanmax(fit) - np.nanmin(fit)
+    tidal_range = datums["HWS"] - datums["LWS"]
     rmse_percent = (rmse / tidal_range) * 100 if tidal_range != 0 else np.nan
 
-    st.metric("RMSE", f"{rmse:.2f} cm / {rmse_percent:.2f} %")
-    st.metric("Tidal Range", f"{tidal_range:.2f} cm")
+    st.metric("RMSE", f"{rmse:.2f} {result_unit} / {rmse_percent:.2f} %")
+    st.metric("Tidal Range", f"{tidal_range:.2f} {result_unit}")
 
     # -----------------------------
     # Excel download
     # -----------------------------
     output_df = pd.DataFrame({
         "datetime": pd.to_datetime(time_val).tz_localize(None),
-        "observed_cm": elev,
-        "fit_cm": fit,
-        "residual_cm": residual
+        f"observed_{result_unit}": elev,
+        f"fit_{result_unit}": fit,
+        f"residual_{result_unit}": residual
     })
     excel_data = io.BytesIO()
     with pd.ExcelWriter(excel_data, engine="openpyxl") as writer:
@@ -373,12 +465,36 @@ if st.session_state.results is not None:
         datum_df.to_excel(writer, sheet_name="tidal_elevations", index=False)
 
     st.subheader("Download Analysis Results")
+    safe_location = re.sub(
+        r"[^\w.-]+",
+        "-",
+        result_location,
+        flags=re.UNICODE
+    ).strip("-.")
+    safe_location = safe_location or "location"
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stDownloadButton"] button {
+            background-color: #28a745;
+            border-color: #28a745;
+            color: white;
+        }
+        div[data-testid="stDownloadButton"] button:hover {
+            background-color: #218838;
+            border-color: #1e7e34;
+            color: white;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
     st.download_button(
         label="📥 Download Excel Workbook (3 sheets)",
         data=excel_data.getvalue(),
-        file_name=f"{method_used.lower()}_tidal_timeseries.xlsx",
+        file_name=(
+            f"{safe_location}-"
+            f"{method_used.lower()}_tidal_timeseries.xlsx"
+        ),
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
-else:
-    st.info("Paste elevation data, set parameters, then click **Run Analysis**.")
